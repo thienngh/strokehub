@@ -1643,7 +1643,7 @@ class FlappySensorAssessmentApp:
         self.canvas.create_text(
             WIDTH / 2,
             170,
-            text="StrokeLess",
+            text="StrokeHub",
             fill="#172033",
             font=("Courier New", 34, "bold"),
         )

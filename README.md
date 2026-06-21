@@ -112,9 +112,9 @@ Current EMG-related columns are planned as placeholders and can be added without
 
 ## Games
 
-### StrokeFlap
+### neuroFlap
 
-StrokeFlap is a Flappy Bird-style game where arm movement controls the bird’s vertical position. The player must guide the bird through pipes while maintaining grip control.
+neuroFlap is a Flappy Bird-style game where arm movement controls the bird’s vertical position. The player must guide the bird through pipes while maintaining grip control.
 
 Tracked metrics include:
 
@@ -127,9 +127,9 @@ Tracked metrics include:
 * Difficulty progression
 * Camera-phone movement agreement
 
-### StrokePong
+### accelPong
 
-StrokePong is a Pong-style game where arm movement controls the paddle. The player must return the ball while maintaining grip and responding to changing ball movement.
+accelPong is a Pong-style game where arm movement controls the paddle. The player must return the ball while maintaining grip and responding to changing ball movement.
 
 Tracked metrics include:
 

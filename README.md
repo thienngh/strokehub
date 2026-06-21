@@ -18,9 +18,7 @@ StrokeHub was developed by:
 * Lily Duong
 
 ---
-## Note
-
-All the file names are Nervaflex because that was intended in the first place, but now they are all part of the StrokeHub now. 
+Notes: All the file names are Nervaflex because that was intended in the first place, but now they are all part of the StrokeHub now. 
 ---
 
 ## Overview

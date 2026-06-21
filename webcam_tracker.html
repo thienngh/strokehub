@@ -1,0 +1,270 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webcam forearm tracker</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    max-width: 820px; margin: 32px auto; padding: 0 20px; line-height: 1.6; color: #151515; background: #ffffff; }
+  h1 { font-size: 22px; font-weight: 500; }
+  p.sub { color: #3f3f3f; margin-top: -8px; }
+  .controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 20px 0; }
+  button, select { font-size: 15px; padding: 9px 16px; border-radius: 8px;
+    border: 1px solid #777; background: #f4f4f2; color: #151515; cursor: pointer; }
+  button:hover { background: #eaeae6; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .status { font-size: 15px; padding: 10px 14px; border-radius: 8px;
+    background: #f0f0ee; border: 1px solid #ccc; color: #151515; margin-bottom: 18px; }
+  .status.ok { background: #e7f3ea; border-color: #9bc8a7; color: #183d24; }
+  .status.err { background: #f7e9e9; border-color: #d59797; color: #5b1515; }
+  .stage { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .mirror { position: relative; transform: scaleX(-1); width: 480px; max-width: 100%; }
+  .cameraColumn { width: 480px; max-width: 100%; }
+  .brand { text-align: center; font-size: 28px; font-weight: 700; letter-spacing: 0.04em;
+    color: #1767e8; margin-top: 14px; }
+  .telemetry { display: none; }
+  video, canvas { width: 100%; display: block; border-radius: 10px; }
+  canvas { position: absolute; top: 0; left: 0; }
+  .panel { flex: 1; min-width: 200px; }
+  .metric { margin-bottom: 14px; }
+  .metric .label { font-size: 13px; color: #3f3f3f; text-transform: uppercase; letter-spacing: 0.05em; }
+  .metric .value { font-size: 32px; font-weight: 500; font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .bar { width: 40px; height: 240px; border: 1px solid #aaa; border-radius: 8px;
+    position: relative; background: #f4f4f2; }
+  .bar .paddle { position: absolute; left: 3px; right: 3px; height: 36px;
+    background: #2f7d52; border-radius: 5px; top: 0; }
+  .barwrap { display: flex; gap: 10px; align-items: center; }
+  .hint { font-size: 13px; color: #4a4a4a; }
+</style>
+</head>
+<body>
+  <h1>Webcam forearm tracker</h1>
+  <p class="sub">Tracks the forearm angle (elbow to wrist) and shows the value that will drive the paddle. Raise and lower your forearm and confirm it follows.</p>
+
+  <div class="controls">
+    <button id="start">Start camera + tracking</button>
+    <label>Arm:
+      <select id="side">
+        <option value="16">Right (elbow 14, wrist 16)</option>
+        <option value="15">Left (elbow 13, wrist 15)</option>
+      </select>
+    </label>
+    <button id="setTop" class="telemetry" disabled>Set top</button>
+    <button id="setBottom" class="telemetry" disabled>Set bottom</button>
+  </div>
+
+  <div id="status" class="status">Not started. Serve this over http://localhost and open in Chrome, then click start and allow the camera.</div>
+
+  <div class="stage">
+    <div class="cameraColumn">
+      <div class="mirror">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+      </div>
+      <div class="brand">StrokeHub</div>
+    </div>
+    <div class="panel telemetry">
+      <div class="metric"><div class="label">Forearm angle (&deg;)</div><div class="value" id="angle">--</div></div>
+      <div class="metric"><div class="label">Elbow angle (&deg;)</div><div class="value" id="elbowAngle">--</div></div>
+      <div class="metric"><div class="label">Shoulder elevation (&deg;)</div><div class="value" id="shoulderAngle">--</div></div>
+      <div class="metric"><div class="label">Tracking visibility</div><div class="value" id="vis">--</div></div>
+      <div class="barwrap">
+        <div class="bar"><div class="paddle" id="paddle"></div></div>
+        <div>
+          <div class="label" style="font-size:13px;color:#3f3f3f;">Paddle preview</div>
+          <div class="hint">Set top (raised) &amp; bottom (lowered)<br>to map your forearm range onto the paddle.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script type="module">
+  // Keep the import and the /wasm path on the SAME version. If the model fetch fails,
+  // download it locally (see notes) and set modelAssetPath to a relative path like "pose_landmarker_lite.task".
+  import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+
+  const statusEl = document.getElementById("status");
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("overlay");
+  const ctx = canvas.getContext("2d");
+  const angleEl = document.getElementById("angle");
+  const elbowAngleEl = document.getElementById("elbowAngle");
+  const shoulderAngleEl = document.getElementById("shoulderAngle");
+  const visEl = document.getElementById("vis");
+  const paddleEl = document.getElementById("paddle");
+  const sideSel = document.getElementById("side");
+  const startBtn = document.getElementById("start");
+  const setTopBtn = document.getElementById("setTop");
+  const setBottomBtn = document.getElementById("setBottom");
+
+  let landmarker = null;
+  let running = false;
+  let lastTime = -1;
+  let topA = null, bottomA = null;   // calibrated forearm angles: raised (top) and lowered (bottom)
+  let currentA = null;
+  let lastPostTime = 0;
+
+  function angleBetween(ax, ay, bx, by) {
+    const denominator = Math.hypot(ax, ay) * Math.hypot(bx, by);
+    if (!denominator) return null;
+    const cosine = Math.max(-1, Math.min(1, (ax * bx + ay * by) / denominator));
+    return Math.acos(cosine) * 180 / Math.PI;
+  }
+
+  function postCameraSample(sample, now) {
+    if (now - lastPostTime < 50) return; // Up to 20 study samples/second.
+    lastPostTime = now;
+    fetch("/camera", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(sample),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  function setStatus(msg, kind) {
+    statusEl.textContent = msg;
+    statusEl.className = "status" + (kind ? " " + kind : "");
+  }
+
+  async function init() {
+    setStatus("Loading the pose model from the CDN (needs internet)...", "");
+    try {
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+      );
+      landmarker = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+          delegate: "GPU",
+        },
+        runningMode: "VIDEO",
+        numPoses: 1,
+      });
+    } catch (err) {
+      setStatus("Could not load the model: " + err.message + " (check internet / the CDN version + model URL).", "err");
+      return false;
+    }
+    return true;
+  }
+
+  async function start() {
+    startBtn.disabled = true;
+    if (!landmarker && !(await init())) { startBtn.disabled = false; return; }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+    } catch (err) {
+      setStatus("Camera access failed: " + err.message + " (must be on http://localhost or https, and permission allowed).", "err");
+      startBtn.disabled = false;
+      return;
+    }
+    video.srcObject = stream;
+    await video.play();
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    setStatus("Tracking. Raise and lower your forearm â€” the angle should rise when raised and fall when lowered.", "ok");
+    setTopBtn.disabled = false;
+    setBottomBtn.disabled = false;
+    running = true;
+    loop();
+  }
+
+  function loop() {
+    if (!running) return;
+    const now = performance.now();
+    if (now !== lastTime) {           // timestamps must strictly increase
+      lastTime = now;
+      const result = landmarker.detectForVideo(video, now);
+      draw(result);
+    }
+    requestAnimationFrame(loop);
+  }
+
+  function draw(result) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const poses = result.landmarks;
+    if (!poses || poses.length === 0) {
+      angleEl.textContent = "--";
+      elbowAngleEl.textContent = "--";
+      shoulderAngleEl.textContent = "--";
+      visEl.textContent = "no pose";
+      currentA = null;
+      postCameraSample({tracking: false, timestamp_ms: performance.now()}, performance.now());
+      return;
+    }
+    const lm = poses[0];
+    const wIdx = parseInt(sideSel.value, 10);     // 15 left wrist, 16 right wrist
+    const eIdx = (wIdx === 16) ? 14 : 13;         // matching elbow
+    const sIdx = (wIdx === 16) ? 12 : 11;         // matching shoulder
+    const shoulder = lm[sIdx];
+    const elbow = lm[eIdx];
+    const wrist = lm[wIdx];
+
+    const sx = shoulder.x * canvas.width, sy = shoulder.y * canvas.height;
+    const ex = elbow.x * canvas.width,  ey = elbow.y * canvas.height;
+    const wx = wrist.x * canvas.width,  wy = wrist.y * canvas.height;
+
+    // Forearm angle: +90 = forearm straight up, 0 = horizontal, -90 = straight down.
+    // abs(dx) makes it independent of which way the arm points (and of the mirrored view);
+    // pixel scaling corrects for the image aspect ratio.
+    const angleDeg = Math.atan2(ey - wy, Math.abs(wx - ex)) * 180 / Math.PI;
+    const elbowDeg = angleBetween(sx - ex, sy - ey, wx - ex, wy - ey);
+    const shoulderDeg = Math.atan2(sy - ey, Math.abs(ex - sx)) * 180 / Math.PI;
+
+    // Draw the forearm (elbow pivot -> wrist) and mark both joints.
+    ctx.lineWidth = 4; ctx.strokeStyle = "rgba(47,125,82,0.85)";
+    ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(wx, wy); ctx.stroke();
+    ctx.fillStyle = "#2f7d52"; ctx.beginPath(); ctx.arc(ex, ey, 8, 0, Math.PI * 2); ctx.fill();  // elbow
+    ctx.fillStyle = "#d24b3e"; ctx.beginPath(); ctx.arc(wx, wy, 10, 0, Math.PI * 2); ctx.fill(); // wrist
+    ctx.fillStyle = "#1767e8"; ctx.beginPath(); ctx.arc(sx, sy, 8, 0, Math.PI * 2); ctx.fill();   // shoulder
+    ctx.strokeStyle = "rgba(23,103,232,0.75)";
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+
+    currentA = angleDeg;
+    angleEl.textContent = angleDeg.toFixed(1);
+    elbowAngleEl.textContent = elbowDeg === null ? "--" : elbowDeg.toFixed(1);
+    shoulderAngleEl.textContent = shoulderDeg.toFixed(1);
+    const v = Math.min(shoulder.visibility ?? 1, elbow.visibility ?? 1, wrist.visibility ?? 1);
+    visEl.textContent = v.toFixed(2);
+    postCameraSample({
+      tracking: true,
+      timestamp_ms: performance.now(),
+      side: wIdx === 16 ? "right" : "left",
+      forearm_angle_deg: angleDeg,
+      elbow_angle_deg: elbowDeg,
+      shoulder_elevation_deg: shoulderDeg,
+      visibility: v,
+      shoulder_x: shoulder.x,
+      shoulder_y: shoulder.y,
+      elbow_x: elbow.x,
+      elbow_y: elbow.y,
+      wrist_x: wrist.x,
+      wrist_y: wrist.y,
+    }, performance.now());
+    updatePaddle();
+  }
+
+  function updatePaddle() {
+    if (currentA === null || topA === null || bottomA === null || topA === bottomA) return;
+    // raised forearm = higher angle = paddle at top (p = 0).
+    let p = (topA - currentA) / (topA - bottomA);
+    p = Math.max(0, Math.min(1, p));
+    const barH = 240, padH = 36;
+    paddleEl.style.top = (p * (barH - padH)) + "px";
+  }
+
+  setTopBtn.addEventListener("click", () => {
+    if (currentA !== null) { topA = currentA; setStatus("Top set at " + topA.toFixed(1) + "\u00B0 (forearm raised). Now lower it and set bottom.", "ok"); }
+  });
+  setBottomBtn.addEventListener("click", () => {
+    if (currentA !== null) { bottomA = currentA; setStatus("Bottom set at " + bottomA.toFixed(1) + "\u00B0 (forearm lowered). Paddle preview is now mapped to your range.", "ok"); }
+  });
+  startBtn.addEventListener("click", start);
+</script>
+</body>
+</html>
+
